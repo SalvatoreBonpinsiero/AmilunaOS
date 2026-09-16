@@ -81,21 +81,25 @@ extern void irq4(); extern void irq5(); extern void irq6(); extern void irq7();
 extern void irq8(); extern void irq9(); extern void irq10(); extern void irq11();
 extern void irq12(); extern void irq13(); extern void irq14(); extern void irq15();
 
-#define COLOR_BG          0xFF0A1128
-#define COLOR_PANEL       0xFF141E36
-#define COLOR_HEADER      0xFF0B132B
-#define COLOR_ACCENT      0xFF00D2FF
-#define COLOR_BORDER      0xFF1E56A0
-#define COLOR_BTN         0xFF1A2744
-#define COLOR_BTN_BORDER  0xFF2D4B7D
-#define COLOR_BTN_HOVER   0xFF263963
-#define COLOR_BTN_ACTIVE  0xFF00A3FF
+#define COLOR_BG          0xFF060B19
+#define COLOR_PANEL       0xFF0D172E
+#define COLOR_HEADER      0xFF091024
+#define COLOR_ACCENT      0xFF00F0FF
+#define COLOR_BLUE_MID    0xFF1D5AFF
+#define COLOR_BORDER      0xFF1B3563
+#define COLOR_BTN         0xFF132242
+#define COLOR_BTN_BORDER  0xFF23447F
+#define COLOR_BTN_HOVER   0xFF1E3566
+#define COLOR_BTN_ACTIVE  0xFF00D2FF
 #define COLOR_PIN_ON      0xFF00F0FF
-#define COLOR_PIN_OFF     0xFF0D1527
+#define COLOR_PIN_OFF     0xFF0B1224
 #define COLOR_WHITE       0xFFFFFFFF
-#define COLOR_TEXT_MUTED  0xFF8A99AD
-#define COLOR_TERM_BG     0xFF050814
+#define COLOR_TEXT_MUTED  0xFF71829D
+#define COLOR_TERM_BG     0xFF03060E
 #define COLOR_SUCCESS     0xFF00E676
+#define COLOR_KEYWORD     0xFFFF7675
+#define COLOR_FUNC        0xFF55EFC4
+#define COLOR_COMMENT     0xFF636E72
 
 static struct gdt_entry gdt[3];
 static struct gdt_ptr   gp;
@@ -113,11 +117,39 @@ static volatile int32_t mouse_y = 384;
 static volatile uint8_t mouse_buttons = 0;
 static volatile uint8_t prev_mouse_buttons = 0;
 
+static volatile char last_key_char = 0;
+
 static uint8_t  gpio_state[16] = {0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0};
 static uint8_t  analyzer_running = 1;
 static uint32_t system_ticks = 0;
-static uint32_t tx_counter = 1042;
-static uint8_t  log_cursor_blink = 0;
+static uint8_t  cursor_blink = 0;
+static uint8_t  active_tab = 0;
+
+static char editor_lines[12][64] = {
+    "void setup() {",
+    "  pinMode(P04, OUTPUT);",
+    "  Serial.begin(115200);",
+    "  Wire.begin(0x3C);",
+    "}",
+    "",
+    "void loop() {",
+    "  digitalWrite(P04, HIGH);",
+    "  delay(500);",
+    "  digitalWrite(P04, LOW);",
+    "  delay(500);",
+    "}"
+};
+
+static int edit_cursor_row = 7;
+static int edit_cursor_col = 26;
+
+static char console_log[5][80] = {
+    "[INIT] Amiluna IDE Engine v3.0 online",
+    "[TOOL] Toolchain AVR/Xtensa initialized",
+    "[VBUS] Link established /dev/vbus0",
+    "[SIM] Ready for script compilation",
+    "[STATUS] Waiting user input..."
+};
 
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ __volatile__("outb %0, %1" : : "a"(val), "Nd"(port));
@@ -292,17 +324,29 @@ void isr_handler(registers_t* r) {
     (void)r;
 }
 
+static const char kbd_map[128] = {
+    0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
+    '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
+    0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`',
+    0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0,
+    '*', 0, ' '
+};
+
 static uint8_t mouse_cycle = 0;
 static int8_t mouse_byte[3];
 
 void irq_handler(registers_t* r) {
     if (r->int_no == 32) {
         system_ticks++;
-        if ((system_ticks % 30) == 0) {
-            log_cursor_blink = !log_cursor_blink;
+        if ((system_ticks % 25) == 0) {
+            cursor_blink = !cursor_blink;
         }
-        if (analyzer_running && (system_ticks % 6) == 0) {
-            tx_counter++;
+    } else if (r->int_no == 33) {
+        uint8_t scancode = inb(0x60);
+        if (!(scancode & 0x80)) {
+            if (scancode < 128) {
+                last_key_char = kbd_map[scancode];
+            }
         }
     } else if (r->int_no == 44) {
         uint8_t status = inb(0x64);
@@ -358,9 +402,14 @@ static const uint8_t font8x8[128][8] = {
     ['.'] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00},
     ['/'] = {0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x00},
     [':'] = {0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00},
+    [';'] = {0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x30, 0x00},
+    ['<'] = {0x06, 0x0C, 0x18, 0x30, 0x18, 0x0C, 0x06, 0x00},
     ['='] = {0x00, 0x00, 0x7E, 0x00, 0x7E, 0x00, 0x00, 0x00},
+    ['>'] = {0x60, 0x30, 0x18, 0x0C, 0x18, 0x30, 0x60, 0x00},
     ['['] = {0x1E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x1E, 0x00},
     [']'] = {0x78, 0x18, 0x18, 0x18, 0x18, 0x18, 0x78, 0x00},
+    ['{'] = {0x0E, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0E, 0x00},
+    ['}'] = {0x70, 0x18, 0x18, 0x0E, 0x18, 0x18, 0x70, 0x00},
     ['~'] = {0x00, 0x32, 0x4C, 0x00, 0x00, 0x00, 0x00, 0x00},
     ['0'] = {0x3C, 0x66, 0x6E, 0x76, 0x66, 0x66, 0x3C, 0x00},
     ['1'] = {0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00},
@@ -407,12 +456,14 @@ static const uint8_t font8x8[128][8] = {
     ['g'] = {0x00, 0x00, 0x3E, 0x66, 0x66, 0x3E, 0x06, 0x7C},
     ['h'] = {0x60, 0x60, 0x7C, 0x66, 0x66, 0x66, 0x66, 0x00},
     ['i'] = {0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3C, 0x00},
+    ['j'] = {0x06, 0x00, 0x06, 0x06, 0x06, 0x06, 0x66, 0x3C},
     ['k'] = {0x60, 0x60, 0x66, 0x6C, 0x78, 0x6C, 0x66, 0x00},
     ['l'] = {0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00},
     ['m'] = {0x00, 0x00, 0x76, 0x69, 0x69, 0x69, 0x69, 0x00},
     ['n'] = {0x00, 0x00, 0x7C, 0x66, 0x66, 0x66, 0x66, 0x00},
     ['o'] = {0x00, 0x00, 0x3C, 0x66, 0x66, 0x66, 0x3C, 0x00},
     ['p'] = {0x00, 0x00, 0x7C, 0x66, 0x66, 0x7C, 0x60, 0x60},
+    ['q'] = {0x00, 0x00, 0x3E, 0x66, 0x66, 0x3E, 0x06, 0x06},
     ['r'] = {0x00, 0x00, 0x6C, 0x76, 0x60, 0x60, 0x60, 0x00},
     ['s'] = {0x00, 0x00, 0x3E, 0x60, 0x3C, 0x06, 0x7C, 0x00},
     ['t'] = {0x18, 0x18, 0x7E, 0x18, 0x18, 0x18, 0x0E, 0x00},
@@ -470,23 +521,20 @@ static void buf_text(int x, int y, const char* s, uint32_t col) {
     }
 }
 
-static void int_to_str(uint32_t val, char* buf) {
-    char temp[12];
-    int i = 0;
-    if (val == 0) {
-        buf[0] = '0';
-        buf[1] = '\0';
-        return;
+static void swap_buffers(void) {
+    uint32_t* src = back_buffer;
+    uint32_t* dst = fb_front;
+    int total = fb_w * fb_h;
+    while (total--) {
+        *dst++ = *src++;
     }
-    while (val > 0) {
-        temp[i++] = (val % 10) + '0';
-        val /= 10;
+}
+
+static void delay_ticks(uint32_t ticks) {
+    uint32_t target = system_ticks + ticks;
+    while (system_ticks < target) {
+        __asm__ __volatile__("pause");
     }
-    int j = 0;
-    while (i > 0) {
-        buf[j++] = temp[--i];
-    }
-    buf[j] = '\0';
 }
 
 static uint8_t point_in_rect(int px, int py, int rx, int ry, int rw, int rh) {
@@ -498,7 +546,7 @@ static uint8_t render_button(int x, int y, int w, int h, const char* label, uint
     uint32_t bg = is_active ? COLOR_BTN_ACTIVE : (hovered ? COLOR_BTN_HOVER : COLOR_BTN);
     uint32_t border = hovered ? COLOR_ACCENT : COLOR_BTN_BORDER;
 
-    buf_rect(x + 2, y + 2, w, h, 0xFF04060E);
+    buf_rect(x + 2, y + 2, w, h, 0xFF020409);
     buf_rect(x, y, w, h, bg);
     buf_rect_outline(x, y, w, h, border);
 
@@ -514,13 +562,27 @@ static uint8_t render_button(int x, int y, int w, int h, const char* label, uint
 }
 
 static void draw_window(int x, int y, int w, int h, const char* title) {
-    buf_rect(x + 4, y + 4, w, h, 0xFF04060E);
+    buf_rect(x + 4, y + 4, w, h, 0xFF020409);
     buf_rect(x, y, w, h, COLOR_PANEL);
     buf_rect_outline(x, y, w, h, COLOR_BORDER);
     buf_rect(x, y, w, 28, COLOR_HEADER);
     buf_rect_outline(x, y, w, 28, COLOR_BORDER);
     buf_rect(x + 8, y + 8, 12, 12, COLOR_ACCENT);
     buf_text(x + 28, y + 10, title, COLOR_WHITE);
+}
+
+static void log_message(const char* msg) {
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 80; ++j) {
+            console_log[i][j] = console_log[i + 1][j];
+        }
+    }
+    int j = 0;
+    while (msg[j] && j < 78) {
+        console_log[4][j] = msg[j];
+        j++;
+    }
+    console_log[4][j] = '\0';
 }
 
 static const uint8_t cursor_mask[16][12] = {
@@ -555,32 +617,276 @@ static void draw_cursor(int x, int y) {
     }
 }
 
+static void show_boot_screen(void) {
+    for (int step = 0; step <= 100; step += 2) {
+        buf_rect(0, 0, fb_w, fb_h, COLOR_BG);
+
+        int cx = fb_w / 2;
+        int cy = fb_h / 2 - 40;
+
+        buf_rect(cx - 32, cy - 32, 64, 64, COLOR_HEADER);
+        buf_rect_outline(cx - 32, cy - 32, 64, 64, COLOR_ACCENT);
+        buf_rect(cx - 16, cy - 16, 32, 32, COLOR_BLUE_MID);
+
+        buf_text(cx - 96, cy + 50, "AMILUNA EMBEDDED OS", COLOR_WHITE);
+        buf_text(cx - 72, cy + 70, "BY SALVATORE BONPENSIERO", COLOR_ACCENT);
+
+        int bar_w = 400;
+        int bar_h = 14;
+        int bar_x = cx - bar_w / 2;
+        int bar_y = cy + 110;
+
+        buf_rect(bar_x, bar_y, bar_w, bar_h, COLOR_TERM_BG);
+        buf_rect_outline(bar_x, bar_y, bar_w, bar_h, COLOR_BORDER);
+        buf_rect(bar_x + 2, bar_y + 2, ((bar_w - 4) * step) / 100, bar_h - 4, COLOR_ACCENT);
+
+        if (step < 30) {
+            buf_text(cx - 120, cy + 135, "INITIALIZING GDT / IDT TABLES...", COLOR_TEXT_MUTED);
+        } else if (step < 60) {
+            buf_text(cx - 130, cy + 135, "CALIBRATING PIT TIMER & PS/2 BUS...", COLOR_TEXT_MUTED);
+        } else if (step < 90) {
+            buf_text(cx - 135, cy + 135, "MAPPING VIRTUAL PROTOCOLS UART/SPI...", COLOR_TEXT_MUTED);
+        } else {
+            buf_text(cx - 110, cy + 135, "LAUNCHING AMILUNA STUDIO IDE...", COLOR_SUCCESS);
+        }
+
+        swap_buffers();
+        delay_ticks(1);
+    }
+    delay_ticks(20);
+}
+
+static void load_tab_code(uint8_t tab) {
+    active_tab = tab;
+    if (tab == 0) {
+        const char* blink_code[12] = {
+            "void setup() {",
+            "  pinMode(P04, OUTPUT);",
+            "  Serial.begin(115200);",
+            "  Wire.begin(0x3C);",
+            "}",
+            "",
+            "void loop() {",
+            "  digitalWrite(P04, HIGH);",
+            "  delay(500);",
+            "  digitalWrite(P04, LOW);",
+            "  delay(500);",
+            "}"
+        };
+        for (int i = 0; i < 12; i++) {
+            int j = 0;
+            while (blink_code[i][j]) {
+                editor_lines[i][j] = blink_code[i][j];
+                j++;
+            }
+            editor_lines[i][j] = '\0';
+        }
+    } else if (tab == 1) {
+        const char* i2c_code[12] = {
+            "#include <Wire.h>",
+            "void setup() {",
+            "  Wire.begin();",
+            "  Serial.begin(115200);",
+            "  Serial.println(\"I2C Scan\");",
+            "}",
+            "void loop() {",
+            "  byte error, address;",
+            "  Wire.beginTransmission(0x3C);",
+            "  error = Wire.endTransmission();",
+            "  if (error == 0) Serial.println(\"Found\");",
+            "}"
+        };
+        for (int i = 0; i < 12; i++) {
+            int j = 0;
+            while (i2c_code[i][j]) {
+                editor_lines[i][j] = i2c_code[i][j];
+                j++;
+            }
+            editor_lines[i][j] = '\0';
+        }
+    } else {
+        const char* lua_code[12] = {
+            "-- ESP32 BLE Beacon Helper",
+            "local ble = require(\"esp_ble\")",
+            "function onPacket(uuid, rssi)",
+            "  print(\"Device:\", uuid, rssi)",
+            "  if rssi > -60 then",
+            "    gpio.write(14, 1)",
+            "  end",
+            "end",
+            "ble.scan(onPacket)",
+            "",
+            "-- Daemon running",
+            "print(\"Scanner ready\")"
+        };
+        for (int i = 0; i < 12; i++) {
+            int j = 0;
+            while (lua_code[i][j]) {
+                editor_lines[i][j] = lua_code[i][j];
+                j++;
+            }
+            editor_lines[i][j] = '\0';
+        }
+    }
+}
+
+static void render_editor(int x, int y, int w, int h, uint8_t click_now) {
+    draw_window(x, y, w, h, "AMILUNA CODE STUDIO (ARDUINO / ESP / LUA)");
+
+    int tab_w = 110;
+    if (render_button(x + 12, y + 36, tab_w, 24, "Blink.ino", active_tab == 0, click_now)) {
+        load_tab_code(0);
+        log_message("[IDE] Switched to Blink.ino");
+    }
+    if (render_button(x + 126, y + 36, tab_w, 24, "I2C_Scan.ino", active_tab == 1, click_now)) {
+        load_tab_code(1);
+        log_message("[IDE] Switched to I2C_Scan.ino");
+    }
+    if (render_button(x + 240, y + 36, tab_w, 24, "ESP_BLE.lua", active_tab == 2, click_now)) {
+        load_tab_code(2);
+        log_message("[IDE] Switched to ESP_BLE.lua");
+    }
+
+    int ed_x = x + 12;
+    int ed_y = y + 68;
+    int ed_w = w - 24;
+    int ed_h = h - 110;
+
+    buf_rect(ed_x, ed_y, ed_w, ed_h, COLOR_TERM_BG);
+    buf_rect_outline(ed_x, ed_y, ed_w, ed_h, COLOR_BORDER);
+
+    buf_rect(ed_x, ed_y, 36, ed_h, COLOR_HEADER);
+    buf_rect_outline(ed_x, ed_y, 36, ed_h, COLOR_BORDER);
+
+    for (int i = 0; i < 12; ++i) {
+        int line_y = ed_y + 10 + i * 18;
+        char num[4];
+        if (i + 1 < 10) {
+            num[0] = ' ';
+            num[1] = '1' + i;
+            num[2] = '\0';
+        } else {
+            num[0] = '1';
+            num[1] = '0' + (i - 9);
+            num[2] = '\0';
+        }
+        buf_text(ed_x + 8, line_y, num, COLOR_TEXT_MUTED);
+
+        const char* str = editor_lines[i];
+        uint32_t color = COLOR_WHITE;
+        if (str[0] == '/' && str[1] == '/') color = COLOR_COMMENT;
+        else if (str[0] == '-' && str[1] == '-') color = COLOR_COMMENT;
+        else if (str[0] == '#') color = COLOR_KEYWORD;
+        else if (str[0] == 'v' && str[1] == 'o') color = COLOR_FUNC;
+
+        buf_text(ed_x + 46, line_y, str, color);
+
+        if (i == edit_cursor_row && cursor_blink) {
+            int cx = ed_x + 46 + edit_cursor_col * 8;
+            buf_rect(cx, line_y, 8, 12, COLOR_ACCENT);
+        }
+    }
+
+    int btn_y = y + h - 36;
+    if (render_button(x + 12, btn_y, 110, 26, "COMPILE", 0, click_now)) {
+        log_message("[GCC] Compilation OK: 1420 bytes flash");
+    }
+    if (render_button(x + 128, btn_y, 130, 26, "FLASH VIRTUAL", 1, click_now)) {
+        gpio_state[4] = 1;
+        log_message("[FLASH] Firmware flashed to target P04");
+    }
+    if (render_button(x + 264, btn_y, 100, 26, "STEP RUN", 0, click_now)) {
+        gpio_state[4] = !gpio_state[4];
+        log_message("[SIM] Cycle step executed: P04 toggled");
+    }
+    if (render_button(x + 370, btn_y, 100, 26, "CLEAR LOG", 0, click_now)) {
+        for (int i = 0; i < 5; i++) console_log[i][0] = '\0';
+        log_message("[LOG] Cleared");
+    }
+}
+
 static void render_gui(uint8_t click_now) {
     buf_rect(0, 0, fb_w, fb_h, COLOR_BG);
 
     buf_rect(0, 0, fb_w, 32, COLOR_HEADER);
     buf_rect_outline(0, 0, fb_w, 32, COLOR_BORDER);
     buf_rect(10, 9, 14, 14, COLOR_ACCENT);
-    buf_text(32, 12, "AMILUNA OS - REALTIME EMBEDDED SYSTEM", COLOR_WHITE);
+    buf_text(32, 12, "AMILUNA OS - EMBEDDED IDE & SILICON WORKSTATION", COLOR_WHITE);
     buf_text(fb_w - 290, 12, "SALVATORE BONPENSIERO", COLOR_ACCENT);
 
-    draw_window(24, 52, 440, 280, "VIRTUAL GPIO CONTROLLER (CLICK PINS)");
+    render_editor(16, 44, 490, 360, click_now);
+
+    draw_window(518, 44, 490, 360, "BLUETRACE REAL-TIME LOGIC ANALYZER");
+
+    int gx = 530;
+    int gy = 84;
+    int gw = 466;
+    int gh = 230;
+
+    buf_rect(gx, gy, gw, gh, COLOR_TERM_BG);
+    buf_rect_outline(gx, gy, gw, gh, COLOR_BORDER);
+
+    const char* channels[4] = {"CH0:P04-PWM", "CH1:UART-TX", "CH2:SPI-SCK", "CH3:I2C-SDA"};
+    uint32_t sig_colors[4] = {COLOR_ACCENT, 0xFF38EF7D, 0xFFFF7675, 0xFFF1C40F};
+
+    for (int ch = 0; ch < 4; ++ch) {
+        int cy = gy + 12 + ch * 52;
+        buf_text(gx + 8, cy, channels[ch], sig_colors[ch]);
+
+        int wave_y = cy + 12;
+        for (int i = 110; i < gw - 8; i += 6) {
+            buf_pixel(gx + i, wave_y + 18, 0xFF142036);
+        }
+
+        uint8_t is_high = 0;
+        int speed_shift = analyzer_running ? ((system_ticks * (ch + 1)) % 32) : 0;
+        int step = 14 + ch * 8;
+
+        for (int i = 110; i < gw - 9; ++i) {
+            int cur_x = i + speed_shift;
+            if ((cur_x % step) == 0) {
+                is_high = !is_high;
+                for (int v = 0; v <= 18; ++v) {
+                    buf_pixel(gx + i, wave_y + v, sig_colors[ch]);
+                }
+            }
+            buf_pixel(gx + i, wave_y + (is_high ? 0 : 18), sig_colors[ch]);
+        }
+    }
+
+    if (render_button(530, 320, 100, 26, "START", analyzer_running, click_now)) {
+        analyzer_running = 1;
+        log_message("[TRACE] Analyzer running");
+    }
+    if (render_button(636, 320, 100, 26, "FREEZE", !analyzer_running, click_now)) {
+        analyzer_running = 0;
+        log_message("[TRACE] Analyzer paused");
+    }
+    if (render_button(742, 320, 110, 26, "CLR BUFFER", 0, click_now)) {
+        log_message("[TRACE] Sampling buffer cleared");
+    }
+    if (render_button(858, 320, 110, 26, "EXPORT CSV", 0, click_now)) {
+        log_message("[EXPORT] Saved to /dev/vbus/trace.csv");
+    }
+
+    draw_window(16, 416, 490, 336, "VIRTUAL PINOUT & PERIPHERAL MATRIX");
 
     for (int i = 0; i < 16; ++i) {
-        int px = 24 + 20 + (i % 8) * 50;
-        int py = 52 + 45 + (i / 8) * 90;
+        int px = 16 + 24 + (i % 8) * 54;
+        int py = 416 + 48 + (i / 8) * 96;
 
-        uint8_t hovered = point_in_rect(mouse_x, mouse_y, px, py, 42, 42);
+        uint8_t hovered = point_in_rect(mouse_x, mouse_y, px, py, 44, 44);
         if (hovered && click_now) {
             gpio_state[i] = !gpio_state[i];
+            log_message("[GPIO] State toggled");
         }
 
         uint32_t pin_col = gpio_state[i] ? COLOR_PIN_ON : COLOR_PIN_OFF;
-        buf_rect(px, py, 42, 42, pin_col);
-        buf_rect_outline(px, py, 42, 42, hovered ? COLOR_WHITE : COLOR_BORDER);
+        buf_rect(px, py, 44, 44, pin_col);
+        buf_rect_outline(px, py, 44, 44, hovered ? COLOR_WHITE : COLOR_BORDER);
 
         if (gpio_state[i]) {
-            buf_rect(px + 14, py + 14, 14, 14, COLOR_WHITE);
+            buf_rect(px + 14, py + 14, 16, 16, COLOR_WHITE);
         }
 
         char pstr[5];
@@ -593,135 +899,54 @@ static void render_gui(uint8_t click_now) {
             pstr[2] = '0' + (i - 10);
             pstr[3] = '\0';
         }
-        buf_text(px + 8, py + 48, pstr, gpio_state[i] ? COLOR_ACCENT : COLOR_TEXT_MUTED);
+        buf_text(px + 8, py + 52, pstr, gpio_state[i] ? COLOR_ACCENT : COLOR_TEXT_MUTED);
     }
 
-    if (render_button(44, 285, 95, 28, "ALL ON", 0, click_now)) {
+    if (render_button(36, 680, 95, 26, "SET ALL", 0, click_now)) {
         for (int i = 0; i < 16; i++) gpio_state[i] = 1;
+        log_message("[GPIO] All pins set HIGH");
     }
-    if (render_button(149, 285, 95, 28, "ALL OFF", 0, click_now)) {
+    if (render_button(138, 680, 95, 26, "CLR ALL", 0, click_now)) {
         for (int i = 0; i < 16; i++) gpio_state[i] = 0;
+        log_message("[GPIO] All pins cleared LOW");
     }
-    if (render_button(254, 285, 95, 28, "INVERT", 0, click_now)) {
+    if (render_button(240, 680, 105, 26, "INVERT", 0, click_now)) {
         for (int i = 0; i < 16; i++) gpio_state[i] = !gpio_state[i];
+        log_message("[GPIO] Inverted pin states");
     }
-    if (render_button(359, 285, 85, 28, "RESET", 0, click_now)) {
+    if (render_button(352, 680, 95, 26, "DEFAULT", 0, click_now)) {
         for (int i = 0; i < 16; i++) gpio_state[i] = (i % 3 == 0);
+        log_message("[GPIO] Defaults applied");
     }
 
-    draw_window(480, 52, 520, 280, "BLUETRACE REAL-TIME LOGIC ANALYZER");
+    draw_window(518, 416, 490, 336, "TELEMETRY & HARDWARE EMULATION LOG");
 
-    int gx = 496;
-    int gy = 92;
-    int gw = 488;
-    int gh = 150;
+    int lx = 530;
+    int ly = 456;
+    int lw = 466;
+    int lh = 280;
 
-    buf_rect(gx, gy, gw, gh, COLOR_TERM_BG);
-    buf_rect_outline(gx, gy, gw, gh, COLOR_BORDER);
+    buf_rect(lx, ly, lw, lh, COLOR_TERM_BG);
+    buf_rect_outline(lx, ly, lw, lh, COLOR_BORDER);
 
-    const char* channels[3] = {"CH0:UART-TX", "CH1:SPI-SCK", "CH2:I2C-SDA"};
-    uint32_t sig_colors[3] = {COLOR_ACCENT, 0xFF38EF7D, 0xFFFF7675};
-
-    for (int ch = 0; ch < 3; ++ch) {
-        int cy = gy + 14 + ch * 46;
-        buf_text(gx + 8, cy, channels[ch], sig_colors[ch]);
-
-        int wave_y = cy + 12;
-        for (int i = 110; i < gw - 8; i += 6) {
-            buf_pixel(gx + i, wave_y + 16, 0xFF142036);
-        }
-
-        uint8_t is_high = 0;
-        int speed_shift = analyzer_running ? ((system_ticks * (ch + 1)) % 32) : 0;
-        int step = 16 + ch * 12;
-
-        for (int i = 110; i < gw - 9; ++i) {
-            int cur_x = i + speed_shift;
-            if ((cur_x % step) == 0) {
-                is_high = !is_high;
-                for (int v = 0; v <= 16; ++v) {
-                    buf_pixel(gx + i, wave_y + v, sig_colors[ch]);
-                }
-            }
-            buf_pixel(gx + i, wave_y + (is_high ? 0 : 16), sig_colors[ch]);
+    for (int i = 0; i < 5; ++i) {
+        if (console_log[i][0] != '\0') {
+            buf_text(lx + 12, ly + 14 + i * 20, console_log[i], (i == 4) ? COLOR_ACCENT : COLOR_TEXT_MUTED);
         }
     }
 
-    if (render_button(496, 285, 110, 28, "START RUN", analyzer_running, click_now)) {
-        analyzer_running = 1;
-    }
-    if (render_button(616, 285, 110, 28, "PAUSE", !analyzer_running, click_now)) {
-        analyzer_running = 0;
-    }
-    if (render_button(736, 285, 110, 28, "CLR TRIG", 0, click_now)) {
-        tx_counter = 0;
-    }
-    if (render_button(856, 285, 110, 28, "DUMP PCAP", 0, click_now)) {
-        tx_counter += 100;
-    }
+    buf_text(lx + 12, ly + 140, "TARGET: ATmega328P / ESP32-WROOM", COLOR_WHITE);
+    buf_text(lx + 12, ly + 160, "SYS FREQ: 240.00 MHz (Virtual Core)", COLOR_SUCCESS);
+    buf_text(lx + 12, ly + 180, "I2C SLAVE: 0x3C (SSD1306 OLED EMULATOR)", COLOR_TEXT_MUTED);
+    buf_text(lx + 12, ly + 200, "UART0 BAUD: 115200 (8-N-1 Hardware FIFO)", COLOR_TEXT_MUTED);
 
-    draw_window(24, 350, 976, 390, "SERIAL TELEMETRY & EMULATION BUS [/dev/vbus0]");
-
-    int tx = 40;
-    int ty = 390;
-    int tw = 944;
-    int th = 334;
-
-    buf_rect(tx, ty, tw, th, COLOR_TERM_BG);
-    buf_rect_outline(tx, ty, tw, th, COLOR_BORDER);
-
-    buf_text(tx + 14, ty + 14, "[BOOT] Amiluna RT-Kernel 2.0.0 (x86-32 Protected Mode) initialized.", COLOR_SUCCESS);
-    buf_text(tx + 14, ty + 32, "[GDT/IDT] Global Descriptor and Interrupt Descriptor Tables loaded.", COLOR_WHITE);
-    buf_text(tx + 14, ty + 50, "[IRQ] Dual 8259 PIC remapped to vectors 0x20..0x2F.", COLOR_WHITE);
-    buf_text(tx + 14, ty + 68, "[DRV] PS/2 Auxiliary Mouse Controller online (IRQ12 streaming active).", COLOR_ACCENT);
-    buf_text(tx + 14, ty + 86, "[DRV] 8253 PIT Timer synchronized at 100 Hz (IRQ0 tick count).", COLOR_WHITE);
-
-    char tick_str[32] = "[TIME] Uptime System Ticks: ";
-    char num_buf[16];
-    int_to_str(system_ticks, num_buf);
-    int p = 0;
-    while (tick_str[p]) p++;
-    int q = 0;
-    while (num_buf[q]) tick_str[p++] = num_buf[q++];
-    tick_str[p] = '\0';
-    buf_text(tx + 14, ty + 104, tick_str, COLOR_TEXT_MUTED);
-
-    char tx_str[48] = "[UART] Frames Transmitted: ";
-    int_to_str(tx_counter, num_buf);
-    p = 0;
-    while (tx_str[p]) p++;
-    q = 0;
-    while (num_buf[q]) tx_str[p++] = num_buf[q++];
-    tx_str[p] = '\0';
-    buf_text(tx + 14, ty + 122, tx_str, COLOR_ACCENT);
-
-    char mouse_pos_str[48] = "[INPUT] Pointer X: ";
-    int_to_str(mouse_x, num_buf);
-    p = 0;
-    while (mouse_pos_str[p]) p++;
-    q = 0;
-    while (num_buf[q]) mouse_pos_str[p++] = num_buf[q++];
-    mouse_pos_str[p++] = ' '; mouse_pos_str[p++] = 'Y'; mouse_pos_str[p++] = ':'; mouse_pos_str[p++] = ' ';
-    int_to_str(mouse_y, num_buf);
-    q = 0;
-    while (num_buf[q]) mouse_pos_str[p++] = num_buf[q++];
-    mouse_pos_str[p] = '\0';
-    buf_text(tx + 14, ty + 140, mouse_pos_str, COLOR_WHITE);
-
-    buf_text(tx + 14, ty + 168, "amiluna-root@host:~# vbus-monitor --stream --interactive", COLOR_ACCENT);
-
-    if (log_cursor_blink) {
-        buf_rect(tx + 14 + 56 * 8, ty + 168, 8, 10, COLOR_WHITE);
+    buf_text(lx + 12, ly + 240, "amiluna-studio#", COLOR_ACCENT);
+    if (cursor_blink) {
+        buf_rect(lx + 12 + 16 * 8, ly + 240, 8, 10, COLOR_WHITE);
     }
 
     draw_cursor(mouse_x, mouse_y);
-
-    uint32_t* src = back_buffer;
-    uint32_t* dst = fb_front;
-    int total_pixels = fb_w * fb_h;
-    while (total_pixels--) {
-        *dst++ = *src++;
-    }
+    swap_buffers();
 }
 
 void kmain(uint32_t magic, multiboot_info_t* mbi) {
@@ -741,9 +966,26 @@ void kmain(uint32_t magic, multiboot_info_t* mbi) {
 
     __asm__ __volatile__("sti");
 
+    show_boot_screen();
+
     while (1) {
         uint8_t click_now = (mouse_buttons & 1) && !(prev_mouse_buttons & 1);
         prev_mouse_buttons = mouse_buttons;
+
+        if (last_key_char != 0) {
+            if (last_key_char == '\b') {
+                if (edit_cursor_col > 0) {
+                    edit_cursor_col--;
+                    editor_lines[edit_cursor_row][edit_cursor_col] = '\0';
+                }
+            } else if (last_key_char >= ' ' && last_key_char <= '~') {
+                if (edit_cursor_col < 60) {
+                    editor_lines[edit_cursor_row][edit_cursor_col++] = last_key_char;
+                    editor_lines[edit_cursor_row][edit_cursor_col] = '\0';
+                }
+            }
+            last_key_char = 0;
+        }
 
         render_gui(click_now);
     }
