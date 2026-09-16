@@ -1,4 +1,4 @@
-name: Build Amiluna OS ISO
+name: Build Amiluna OS Bootable ISO
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install build tools and GRUB utilities
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -29,13 +29,13 @@ jobs:
             xorriso \
             mtools
 
-      - name: Build Amiluna Bootable ISO
+      - name: Compile kernel and assemble ISO
         run: |
           make amiluna.iso
 
       - name: Upload ISO Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: amiluna-os-v2.iso
+          name: amiluna-os-v3.iso
           path: amiluna.iso
           retention-days: 30
