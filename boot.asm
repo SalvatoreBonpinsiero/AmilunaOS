@@ -19,7 +19,7 @@ align 4
 section .bss
 align 16
 stack_bottom:
-    resb 16384
+    resb 32768
 stack_top:
 
 section .text
@@ -34,5 +34,6 @@ _start:
     call kmain
 
 .halt:
+    cli
     hlt
     jmp .halt
