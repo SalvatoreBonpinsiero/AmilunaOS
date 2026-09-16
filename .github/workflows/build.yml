@@ -1,0 +1,41 @@
+name: Build Amiluna OS ISO
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools and GRUB utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc \
+            gcc-multilib \
+            nasm \
+            make \
+            binutils \
+            grub-pc-bin \
+            grub-common \
+            xorriso \
+            mtools
+
+      - name: Compile kernel and assemble ISO
+        run: |
+          make amiluna.iso
+
+      - name: Upload ISO Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: amiluna-os-iso
+          path: amiluna.iso
+          retention-days: 14
